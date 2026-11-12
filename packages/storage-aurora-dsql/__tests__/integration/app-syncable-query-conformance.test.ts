@@ -9,7 +9,7 @@
  * in `storage-sqlite/__tests__/app-syncable-query-conformance.test.ts`.
  */
 
-import { describe, it, afterEach } from "vitest";
+import { afterAll, afterEach, describe, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableQueryConformance,
@@ -31,11 +31,46 @@ const TABLE = "rows_under_test";
 const METADATA_TABLE = "metadata_shaped";
 const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
 
-const open: PGlite[] = [];
+/**
+ * The same two-database pool as `app-syncable-conformance.test.ts`, whose
+ * harness has a `peer()`. This contract's harness has none today, so a case
+ * holds one; `takeDatabase` throws rather than hand out one already in use.
+ */
+const POOL_LIMIT = 2;
+/** Booted once per file and reused across cases; see `takeDatabase`. */
+const pool: PGlite[] = [];
+/** How many of `pool` the running case holds. */
+let taken = 0;
 
-afterEach(async () => {
-  await Promise.all(open.splice(0).map((db) => db.close()));
+afterEach(() => {
+  taken = 0;
 });
+
+afterAll(async () => {
+  await Promise.all(pool.splice(0).map((db) => db.close()));
+});
+
+/**
+ * The next database not held by this case, emptied. A cold PGlite boot is
+ * about a second, so the pool keeps the databases and drops `SCHEMA` instead:
+ * it is the only schema a harness creates. The caller re-runs its DDL on what
+ * is left.
+ */
+async function takeDatabase(): Promise<PGlite> {
+  if (taken >= POOL_LIMIT) {
+    throw new Error(
+      `A case asked for database ${taken + 1}; the pool holds ${POOL_LIMIT} (see POOL_LIMIT).`,
+    );
+  }
+  if (taken === pool.length) {
+    const fresh = new PGlite();
+    await fresh.waitReady;
+    pool.push(fresh);
+  }
+  const pg = pool[taken++]!;
+  await pg.exec(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  return pg;
+}
 
 function clientFor(pg: PGlite): DatabaseClient {
   return guardSingleFlight(
@@ -58,9 +93,7 @@ function clientFor(pg: PGlite): DatabaseClient {
 }
 
 async function makeHarness(): Promise<QueryConformanceHarness> {
-  const pg = new PGlite();
-  await pg.waitReady;
-  open.push(pg);
+  const pg = await takeDatabase();
 
   // The owner leads every primary key, as `dsql-ddl.ts` emits it.
   const withOwner = (cols: typeof QUERY_COLUMNS) =>

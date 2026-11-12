@@ -31,7 +31,7 @@
  * that is the claim this closes.
  */
 
-import { describe, it, afterEach } from "vitest";
+import { afterAll, afterEach, describe, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableApplierConformance,
@@ -58,12 +58,46 @@ const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
  * verbatim into a second node — which means the peer has to answer to the same
  * appId as the sender. Two databases is the honest way to get two stores with
  * one identity.
+ *
+ * At most two databases are live in a case: its own harness and the `peer()`
+ * it may ask for. A third would mean a harness nested deeper than the contract
+ * does today; `takeDatabase` throws rather than hand out one already in use.
  */
-const open: PGlite[] = [];
+const POOL_LIMIT = 2;
+/** Booted once per file and reused across cases; see `takeDatabase`. */
+const pool: PGlite[] = [];
+/** How many of `pool` the running case holds. */
+let taken = 0;
 
-afterEach(async () => {
-  await Promise.all(open.splice(0).map((db) => db.close()));
+afterEach(() => {
+  taken = 0;
 });
+
+afterAll(async () => {
+  await Promise.all(pool.splice(0).map((db) => db.close()));
+});
+
+/**
+ * The next database not held by this case, emptied. A cold PGlite boot is
+ * about a second, so the pool keeps the databases and drops `SCHEMA` instead:
+ * it is the only schema a harness creates, and dropping it also undoes
+ * `breakReads`. The caller re-runs its DDL on what is left.
+ */
+async function takeDatabase(): Promise<PGlite> {
+  if (taken >= POOL_LIMIT) {
+    throw new Error(
+      `A case asked for database ${taken + 1}; the pool holds ${POOL_LIMIT} (a harness and its peer). Raise POOL_LIMIT if the contract now nests peers.`,
+    );
+  }
+  if (taken === pool.length) {
+    const fresh = new PGlite();
+    await fresh.waitReady;
+    pool.push(fresh);
+  }
+  const pg = pool[taken++]!;
+  await pg.exec(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  return pg;
+}
 
 /** The `DatabaseClient` shape the applier talks to, over PGlite. */
 function clientFor(pg: PGlite): DatabaseClient {
@@ -80,9 +114,7 @@ function clientFor(pg: PGlite): DatabaseClient {
 }
 
 async function makeHarness(): Promise<ConformanceHarness> {
-  const pg = new PGlite();
-  await pg.waitReady;
-  open.push(pg);
+  const pg = await takeDatabase();
 
   // The same column set `dsql-ddl.ts` emits for a syncable table: the owner,
   // the app's own columns plus the three the protocol owns, and the index the

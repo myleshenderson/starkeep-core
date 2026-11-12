@@ -13,7 +13,7 @@
  * See `~/projects/starkeep/plan-multi-user-roles-2026-10-16.md`, phase 4
  * "Checks".
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { createDataRecord, createHLCClock, type DataRecord } from "@starkeep/protocol-primitives";
 import type { AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
@@ -23,6 +23,7 @@ import { createDsqlByteCoverageStore } from "../../src/byte-coverage.js";
 import { assertOwnerScoped } from "../../src/owner-scope.js";
 import type { DatabaseClient } from "../../src/types.js";
 import { createAppNodeWatermarks, createSharedSchema } from "../pg-shared-schema.js";
+import { dropAllUserSchemas } from "../pglite-reset.js";
 import { guardNodeWatermarks } from "../../src/node-watermarks.js";
 import { guardSingleFlight } from "../../src/single-flight.js";
 
@@ -71,9 +72,19 @@ const namespaces: AppSyncableNamespaceStore = {
   list: () => [],
 } as never;
 
-beforeEach(async () => {
+// One PGlite per file: a cold boot is about a second, and each test gets an
+// empty database by dropping every schema and re-running the DDL below.
+beforeAll(async () => {
   pg = new PGlite();
   await pg.waitReady;
+});
+
+afterAll(async () => {
+  await pg.close();
+});
+
+beforeEach(async () => {
+  await dropAllUserSchemas(pg);
   await createSharedSchema(pg);
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
@@ -94,10 +105,6 @@ beforeEach(async () => {
     );
   `);
   await createAppNodeWatermarks(pg, SCHEMA);
-});
-
-afterEach(async () => {
-  await pg.close();
 });
 
 const clock = createHLCClock({ nodeId: "node-a" });
